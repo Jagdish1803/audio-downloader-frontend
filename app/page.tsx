@@ -46,6 +46,9 @@ function validateUrl(raw: string): string | null {
   return null; // valid
 }
 
+type DownloadFormat = "audio" | "video";
+type AudioQuality = "128" | "192" | "320";
+type VideoQuality = "720" | "1080" | "2160";
 type ItemStatus = "idle" | "loading" | "done" | "error";
 type AppPhase  = "input" | "previewing" | "downloading" | "finished";
 
@@ -107,6 +110,9 @@ function StatusPill({ item }: { item: UrlItem }) {
 export default function Home() {
   const [items, setItems] = useState<UrlItem[]>([{ id: uid(), url: "", status: "idle" }]);
   const [phase, setPhase] = useState<AppPhase>("input");
+  const [format, setFormat] = useState<DownloadFormat>("audio");
+  const [audioQuality, setAudioQuality] = useState<AudioQuality>("320");
+  const [videoQuality, setVideoQuality] = useState<VideoQuality>("1080");
   const abortRef = useRef<AbortController | null>(null);
   const titleTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -172,14 +178,33 @@ export default function Home() {
     setPhase("input");
   }
 
+  function handleFormatChange(newFormat: DownloadFormat) {
+    abortRef.current?.abort();
+    setFormat(newFormat);
+    setPhase("input");
+    setItems((prev) => prev.map((it) => ({
+      ...it,
+      title: undefined,
+      titleLoading: false,
+      infoTitle: undefined,
+      infoDuration: undefined,
+      infoFilesize: undefined,
+      infoLoading: false,
+      infoError: undefined,
+      status: "idle" as ItemStatus,
+      blobUrl: undefined,
+      blobName: undefined,
+    })));
+  }
+
   /** Fetch /api/info for one item and store results */
-  const extractInfo = useCallback(async (item: UrlItem, signal: AbortSignal) => {
+  const extractInfo = useCallback(async (item: UrlItem, signal: AbortSignal, fmt: DownloadFormat, quality: string) => {
     updateItem(item.id, { infoLoading: true, infoError: undefined, infoTitle: undefined });
     try {
       const res = await fetch(`${BACKEND_URL}/api/info`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: item.url.trim() }),
+        body: JSON.stringify({ url: item.url.trim(), format: fmt, quality }),
         signal,
       });
       if (!res.ok) {
@@ -206,13 +231,13 @@ export default function Home() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Actually download one item and store blob URL (no auto-trigger) */
-  const downloadSingle = useCallback(async (item: UrlItem, signal: AbortSignal) => {
+  const downloadSingle = useCallback(async (item: UrlItem, signal: AbortSignal, fmt: DownloadFormat, quality: string) => {
     updateItem(item.id, { status: "loading", blobUrl: undefined, blobName: undefined });
     try {
       const res = await fetch(`${BACKEND_URL}/api/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: item.url.trim() }),
+        body: JSON.stringify({ url: item.url.trim(), format: fmt, quality }),
         signal,
       });
       if (!res.ok) {
@@ -223,7 +248,7 @@ export default function Home() {
       const match =
         disposition.match(/filename\*=UTF-8''([^;]+)/) ||
         disposition.match(/filename="([^"]+)"/);
-      const filename = match ? decodeURIComponent(match[1]) : "audio.mp3";
+      const filename = match ? decodeURIComponent(match[1]) : (fmt === "video" ? "video.mp4" : "audio.mp3");
       const blob = await res.blob();
       const blobUrl = URL.createObjectURL(blob);
       updateItem(item.id, { status: "done", filename, blobUrl, blobName: filename });
@@ -259,7 +284,8 @@ export default function Home() {
     abortRef.current = new AbortController();
     const signal = abortRef.current.signal;
 
-    await Promise.all(active.map((it) => extractInfo(it, signal)));
+    const currentQuality = format === "audio" ? audioQuality : videoQuality;
+    await Promise.all(active.map((it) => extractInfo(it, signal, format, currentQuality)));
   }
 
   /** Phase 2: trigger actual downloads */
@@ -271,8 +297,9 @@ export default function Home() {
     abortRef.current = new AbortController();
     const signal = abortRef.current.signal;
 
+    const currentQuality = format === "audio" ? audioQuality : videoQuality;
     if (active.length === 1) {
-      await downloadSingle(active[0], signal);
+      await downloadSingle(active[0], signal, format, currentQuality);
     } else {
       try {
         setItems((prev) =>
@@ -281,7 +308,7 @@ export default function Home() {
         const res = await fetch(`${BACKEND_URL}/api/download/batch`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ urls: active.map((i) => i.url.trim()) }),
+          body: JSON.stringify({ urls: active.map((i) => i.url.trim()), format, quality: currentQuality }),
           signal,
         });
         if (!res.ok) {
@@ -291,7 +318,7 @@ export default function Home() {
         const blob = await res.blob();
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
-        a.download = "audio-bundle.zip";
+        a.download = format === "video" ? "video-bundle.zip" : "audio-bundle.zip";
         a.click();
         URL.revokeObjectURL(a.href);
         setItems((prev) =>
@@ -340,7 +367,7 @@ export default function Home() {
                 Audio Extractor
               </h1>
               <p className="text-[12px] text-white/40 mt-0.5 leading-none">
-                Video URL → MP3
+                {format === "video" ? "Video URL → MP4" : "Video URL → MP3"}
               </p>
             </div>
           </div>
@@ -360,6 +387,69 @@ export default function Home() {
       <main className="flex-1 px-4 pt-5 pb-2">
         <form id="dl-form" onSubmit={handleExtract} className="flex flex-col gap-3">
 
+          {/* Format toggle — only in input phase */}
+          {phase === "input" && (
+            <div className="flex items-center rounded-xl bg-[#111] border border-white/[0.08] p-1 gap-1">
+              <button
+                type="button"
+                onClick={() => handleFormatChange("audio")}
+                className={`flex-1 flex items-center justify-center gap-1.5 h-9 rounded-lg text-[13px] font-semibold transition-all ${
+                  format === "audio" ? "bg-white text-black" : "text-white/40 active:text-white/60"
+                }`}
+              >
+                <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M12 3v10.55A4 4 0 1014 17V7h4V3h-6z"/>
+                </svg>
+                Audio (MP3)
+              </button>
+              <button
+                type="button"
+                onClick={() => handleFormatChange("video")}
+                className={`flex-1 flex items-center justify-center gap-1.5 h-9 rounded-lg text-[13px] font-semibold transition-all ${
+                  format === "video" ? "bg-white text-black" : "text-white/40 active:text-white/60"
+                }`}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
+                </svg>
+                Video (MP4)
+              </button>
+            </div>
+          )}
+
+          {/* Quality / Resolution selector — only in input phase */}
+          {phase === "input" && (
+            <div className="flex items-center gap-3 px-1">
+              <span className="text-[11px] text-white/30 font-semibold uppercase tracking-wider shrink-0">
+                {format === "audio" ? "Quality" : "Resolution"}
+              </span>
+              <div className="flex gap-1.5">
+                {format === "audio"
+                  ? (["128", "192", "320"] as AudioQuality[]).map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        onClick={() => setAudioQuality(q)}
+                        className={`h-7 px-3 rounded-lg text-[12px] font-semibold transition-all ${
+                          audioQuality === q ? "bg-white text-black" : "bg-white/[0.07] text-white/50 active:bg-white/[0.12]"
+                        }`}
+                      >{q}K</button>
+                    ))
+                  : (["720", "1080", "2160"] as VideoQuality[]).map((q) => (
+                      <button
+                        key={q}
+                        type="button"
+                        onClick={() => setVideoQuality(q)}
+                        className={`h-7 px-3 rounded-lg text-[12px] font-semibold transition-all ${
+                          videoQuality === q ? "bg-white text-black" : "bg-white/[0.07] text-white/50 active:bg-white/[0.12]"
+                        }`}
+                      >{q === "2160" ? "4K" : `${q}p`}</button>
+                    ))
+                }
+              </div>
+            </div>
+          )}
+
           {/* URL cards */}
           {items.map((item, idx) => (
             <div
@@ -369,7 +459,7 @@ export default function Home() {
               {/* Card top bar */}
               <div className="flex items-center justify-between px-4 pt-3 pb-2">
                 <span className="text-[11px] font-bold uppercase tracking-widest text-white/30">
-                  {items.length === 1 ? "Video URL" : `Track ${idx + 1}`}
+                  {items.length === 1 ? "Video URL" : `${format === "video" ? "Video" : "Track"} ${idx + 1}`}
                 </span>
                 <div className="flex items-center gap-3">
                   <StatusPill item={item} />
@@ -470,7 +560,11 @@ export default function Home() {
                                 ~{item.infoFilesize}
                               </span>
                             )}
-                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-white/[0.07] text-white/40 font-medium">MP3</span>
+                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-white/[0.07] text-white/40 font-medium">
+                              {format === "video"
+                                ? `MP4 · ${videoQuality === "2160" ? "4K" : `${videoQuality}p`}`
+                                : `MP3 · ${audioQuality}K`}
+                            </span>
                           </div>
                         </div>
                         {/* Per-item save button (single mode only) */}
@@ -484,7 +578,7 @@ export default function Home() {
                               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                               </svg>
-                              Save MP3
+                              {format === "video" ? "Save MP4" : "Save MP3"}
                             </a>
                           ) : item.status === "loading" ? (
                             <div className="flex items-center justify-center gap-2 mx-3 mb-3 h-10 rounded-xl bg-white/[0.06] text-white/30 text-[13px]">
@@ -535,8 +629,8 @@ export default function Home() {
                 </svg>
               </div>
               <div>
-                <p className="text-[13px] font-semibold text-emerald-400 leading-none">{filledUrls.length} tracks downloaded</p>
-                <p className="text-[11px] text-emerald-700 mt-1">Saved as audio-bundle.zip</p>
+                <p className="text-[13px] font-semibold text-emerald-400 leading-none">{filledUrls.length} {format === "video" ? "videos" : "tracks"} downloaded</p>
+                <p className="text-[11px] text-emerald-700 mt-1">Saved as {format === "video" ? "video-bundle.zip" : "audio-bundle.zip"}</p>
               </div>
             </div>
           )}
@@ -608,7 +702,7 @@ export default function Home() {
                     <svg className="w-4.5 h-4.5" style={{width:18,height:18}} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                     </svg>
-                    {isBatch ? `Download ${filledUrls.length} tracks as ZIP` : "Download MP3"}
+                    {isBatch ? `Download ${filledUrls.length} ${format === "video" ? "videos" : "tracks"} as ZIP` : (format === "video" ? "Download MP4" : "Download MP3")}
                   </>
                 )}
               </button>
@@ -636,7 +730,7 @@ export default function Home() {
                   <circle className="opacity-20" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
                   <path className="opacity-80" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
                 </svg>
-                {isBatch ? `Downloading ${filledUrls.length} tracks…` : "Downloading…"}
+                {isBatch ? `Downloading ${filledUrls.length} ${format === "video" ? "videos" : "tracks"}…` : "Downloading…"}
               </button>
               <button
                 type="button"
